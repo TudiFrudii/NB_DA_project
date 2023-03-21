@@ -1,0 +1,6 @@
+Accession number on GEO:  GSE84046 https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi
+paper link:               https://www.nature.com/articles/ijo201776
+
+GSE84046_series_matrix contains the actual data
+
+GPL11532-32230 file contains information about the array used in the study
