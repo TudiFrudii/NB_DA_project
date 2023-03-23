@@ -16,18 +16,18 @@ for (x in 1:44) {
   if (gse$characteristics_ch1.2[x] == "time of sampling (before/after): before"){
     labels[x] <- "green"
     group_labels[x] <- "control"
-    complete_labels[x] <- paste(colnames(ex), "(", "control", ")")
+    complete_labels[x] <- paste(colnames(ex)[x], "(", "control", ")")
   } 
   # AFTER SAMPLING
   else {
     if (gse$characteristics_ch1.1[x] == "protein content restricted diet: high") {
       labels[x] <- "red"
       group_labels[x] <- "ER_HP"
-      complete_labels[x] <- paste(colnames(ex), "(", "ER_HP", ")")
+      complete_labels[x] <- paste(colnames(ex)[x], "(", "ER_HP", ")")
     } else {
       labels[x] <- "blue"
       group_labels[x] <- "ER_SP"
-      complete_labels[x] <- paste(colnames(ex), "(", "ER_SP", ")")
+      complete_labels[x] <- paste(colnames(ex)[x], "(", "ER_SP", ")")
     }
   }
 }
