@@ -1,0 +1,550 @@
+---
+title: "Network Based Bata Analysis"
+author: "Vittoria"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Preliminary steps
+load libraries
+```{r}
+library("GEOquery")
+library("useful")
+library("rgl")
+library("plotly")
+library("randomForest")
+library("RColorBrewer")
+library("glmnet") 
+library("ROCR")
+library("genefilter")
+library("caret")
+library("e1071")
+library("rScudo")
+library("igraph")
+library("KEGGREST")
+library("KEGGgraph")
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library("pathfindR")
+library("biomaRt")
+```
+
+Import data
+
+```{r}
+gse <- getGEO("GSE84046", destdir = ".", getGPL = FALSE)
+gse <- gse[[1]]
+ex <- exprs(gse)
+```
+
+# Initial analysis
+
+```{r}
+dim(ex)
+boxplot(ex, main = "Boxplot of initial data")
+```
+
+
+## creating vector of labels for further analysis
+labels -> plane color labels
+groups_labels -> labels with group names
+complete_labels -> combination of group + name of the sample
+y_01_control_vs_diet -> labels 0 1 as control 
+and some others
+
+
+```{r}
+#set labels for pca
+labels = c()
+group_labels = c()
+complete_labels = c()
+control_vs_diet_01 = c()
+diet_vs_diet_01 = c()
+ER_positions = c()
+ER_labels = c()
+for (x in 1:44) {
+    # BEFORE SAMPLING -> control group
+    if (gse$characteristics_ch1.2[x] == "time of sampling (before/after): before"){
+        labels[x] <- "green"
+        group_labels[x] <- "control"
+        complete_labels[x] <- paste(colnames(ex)[x], "(", "control", ")")
+        control_vs_diet_01[x] <- "0"
+    } 
+    # AFTER SAMPLING
+    else {
+        control_vs_diet_01[x] <- "1"
+        if (gse$characteristics_ch1.1[x] == "protein content restricted diet: high") {
+            labels[x] <- "red"
+            group_labels[x] <- "ER_HP"
+            complete_labels[x] <- paste(colnames(ex)[x], "(", "ER_HP", ")")
+            diet_vs_diet_01 = append(diet_vs_diet_01, 0)
+            ER_positions = append(ER_positions, x)
+            ER_labels = append(ER_labels, "HP")
+        } else {
+            labels[x] <- "blue"
+            group_labels[x] <- "ER_SP"
+            complete_labels[x] <- paste(colnames(ex)[x], "(", "ER_SP", ")")
+            diet_vs_diet_01 = append(diet_vs_diet_01, 1)
+            ER_positions = append(ER_positions, x)
+            ER_labels = append(ER_labels, "SP")
+        }
+    }
+}
+```
+
+
+## Filtering the dataset by inspecting p-values 
+keep only probes that have a significant difference in at least one of the comparison
+control vs HP
+control vs SP
+HP vs SP
+
+-> filtered dataset is called *ex2*
+
+```{r}
+# performing t-test, will perform pairwise comparison (3 total t-tests)
+# this test is done for feature selection
+# I avoid considering features with a p-value > 0.01 in one of the three t-tests
+
+p_values_HP_NP <- c()
+p_values_NP_control <- c()
+p_values_HP_control <- c()
+
+for (i in 1:32297){
+  # for each mRNA expression row ex[i, 0]
+  HP = c()
+  NP = c()
+  control = c()
+  
+  for (j in 1:44){
+    # for each sample in column j ex[i, j]
+    
+    if (group_labels[j] == "control"){
+      # control case
+      control <- append(control, 2^ex[i, j])
+    } else if (group_labels[j] == "ER_HP") {
+      # HP case
+      HP <- append(HP, 2^ex[i, j])
+    } else {
+      # NP case
+      NP <- append(NP, 2^ex[i, j])
+    }
+  }
+  
+  t_NP_HP <- t.test(HP, NP)
+  p_values_HP_NP <- append(p_values_HP_NP, t_NP_HP$p.value)
+  t_NP_control <- t.test(NP, control)
+  p_values_NP_control <- append(p_values_NP_control, t_NP_control$p.value)
+  t_HP_control <- t.test(HP, control)
+  p_values_HP_control <- append(p_values_HP_control, t_HP_control$p.value)
+  
+}
+
+threshold <- 0.01
+# create empty new matrix
+ex2 = matrix(,nrow = 0, ncol = 44)
+ex2_unique_probes = matrix(,nrow = 0, ncol = 44)
+colnames(ex2) <- colnames(ex)
+colnames(ex2_unique_probes) <- colnames(ex)
+
+for (i in 1 : 32297){
+  if (p_values_HP_control[i] < threshold ||
+      p_values_HP_NP[i] < threshold ||
+      p_values_NP_control[i] < threshold) {
+    # interesting values
+    ex2 <- rbind(ex2, ex[i, ])
+    ex2_unique_probes <- rbind(ex2_unique_probes, ex[i, ])
+    rownames(ex2)[dim(ex2)[1]] <- rownames(ex)[i] 
+    rownames(ex2_unique_probes)[dim(ex2_unique_probes)[1]] <- rownames(ex)[i] 
+  }
+}
+```
+
+# PCA
+
+### performing 2d - PCA with first two components 
+
+```{r}
+pca <- prcomp(t(ex2))
+screeplot(pca)
+
+components <- pca$x
+components <- data.frame(components)
+components <- cbind(components, group_labels)
+
+fig <- plot_ly(components, x = ~PC1, y = ~PC2, color = group_labels, colors =  c('#636EFA','#EF553B','#00CC96'), type = "scatter", mode = "markers", title="PCA analysis with whole dataset")
+
+fig
+
+```
+
+### performing 3d - PCA
+
+```{r}
+components <- pca$x
+components <- data.frame(components)
+components$PC2 <- -components$PC2
+components$PC3 <- -components$PC3
+components = cbind(components, group_labels)
+
+tot_explained_variance_ratio <- summary(pca)[["importance"]]['Proportion of Variance',]
+tot_explained_variance_ratio <- 100 * sum(tot_explained_variance_ratio)
+
+tit = '3D pca plot'
+fig <- plot_ly(components, x = ~PC1, y = ~PC2, z = ~PC3, color = group_labels, colors = c('#636EFA','#EF553B','#00CC96') ) %>%
+  add_markers(size = 12)
+fig <- fig %>%
+  layout(
+    title = tit,
+    scene = list(bgcolor = "#e5ecf6")
+)
+
+fig
+```
+
+
+# Clustering
+
+### k-means
+
+```{r}
+k <- 3
+set.seed(2900)
+kmeans_results = kmeans(t(ex2), k)
+table(kmeans_results$cluster)
+plot(kmeans_results, data=t(ex2)) + geom_text(aes(label = group_labels), hjust = 0, vjust = 0)
+```
+
+### hierarchical clustering
+
+
+```{r}
+dist_matrix = dist(t(ex2))
+hc_results = hclust(dist_matrix, method = "ave")
+
+k <- 3
+groups = cutree(hc_results, k=k)
+# plot(hc_results, hang <-1, labels = groups)
+plot(hc_results, hang <-1, labels = group_labels, main = "hierarchical clustering")
+# rect.hclust(hc_results, k=3, which = NULL, x = NULL, h = NULL, cluster = NULL, border = 2)
+```
+
+```{r}
+dist_matrix = dist(t(ex2))
+hc_results = hclust(dist_matrix, method = "complete")
+
+k <- 3
+groups = cutree(hc_results, k=k)
+# plot(hc_results, hang <-1, labels = groups)
+plot(hc_results, hang <-1, labels = group_labels, main = "hierarchical clustering")
+# rect.hclust(hc_results, k=3, which = NULL, x = NULL, h = NULL, cluster = NULL, border = 2)
+```
+
+```{r}
+dist_matrix = dist(t(ex2))
+hc_results = hclust(dist_matrix, method = "single")
+
+k <- 3
+groups = cutree(hc_results, k=k)
+# plot(hc_results, hang <-1, labels = groups)
+plot(hc_results, hang <-1, labels = group_labels, main = "hierarchical clustering")
+# rect.hclust(hc_results, k=3, which = NULL, x = NULL, h = NULL, cluster = NULL, border = 2)
+```
+
+# Supervised analysis
+
+## Random forest
+
+random forest error
+```{r}
+set.seed(2000)
+rf <- randomForest(x = t(ex2), y = as.factor(group_labels), ntree=1000)
+plot(rf, main = "random forest error")
+```
+
+gene rank for importance of random forest classification
+
+```{r}
+imp.temp <- abs(rf$importance)
+t <- order(imp.temp, decreasing = TRUE)
+
+plot(c(1:nrow(ex2)), imp.temp[t], log="x", cex.main = 1.5, 
+     xlab = "gene rank", ylab="variable importance", cex.lab = 1.5,
+     phc = 16, main = "all subset results")
+```
+
+heatmap
+```{r}
+gn.imp <- names(imp.temp)[t]
+gn.25 <- gn.imp[1:25]
+t <- is.element(rownames(ex2), gn.25)
+sig.ex <- ex2[t,]
+
+# make heatmap
+hmcol <- colorRampPalette(brewer.pal(11, "RdPu"))(500)
+colnames(ex2) <- group_labels
+csc <- rep(hmcol[50], 30)
+csc[group_labels == "control"] <- hmcol[100]
+csc[group_labels == "ER_HP"] <- hmcol[300]
+csc[group_labels == "ER_SP"] <- hmcol[400]
+heatmap(ex2, scale="row", col=hmcol, ColSideColors = csc, main = "Heatmap for gene espression")
+```
+
+## LDA, RF and LASSO
+
+trial: how much does it change by losing the control samples? -> enough
+```{r}
+#subsetting the ex2 with only ER_SP and ER_HP
+ex3 <- ex2[, ER_positions]
+ex3_unique_probes <- ex2_unique_probes[, ER_positions]
+
+set.seed(2000)
+rf <- randomForest(x = t(ex3), y = as.factor(ER_labels), ntree=1000)
+plot(rf, main = "random forest error on ER samples")
+```
+
+check importance for every probe used in random forest training
+
+```{r}
+imp.temp <- abs(rf$importance)
+t <- order(imp.temp, decreasing = TRUE)
+
+plot(c(1:nrow(ex2)), imp.temp[t], log="x", cex.main = 1.5, 
+     xlab = "gene rank", ylab="variable importance", cex.lab = 1.5,
+     phc = 16, main = "HP vs SP subset results")
+```
+
+Accuracy race between RF, LASSO and LDA classification
+
+```{r}
+f <- factor(diet_vs_diet_01)
+tt40 <- rowttests(ex3, f)
+keepers <- which(tt40$p.value<0.1)
+tex = t(ex3)
+dat <- cbind(as.data.frame(tex), f)
+
+colnames(dat)[ncol(dat)] <- "CONDITION"
+n.HP <- 10
+n.SP <- 12
+
+control <- trainControl(method="cv", number = 10)
+metric <- "Accuracy"
+
+fit.lda <- caret::train(CONDITION~., data=dat, method="lda", metric=metric, trControl=control)
+fit.rf <- caret::train(CONDITION~., data=dat, method="rf", metric=metric, trControl=control)
+fit.lasso <- caret::train(CONDITION~., 
+                          data=dat, 
+                          method="glmnet", 
+                          family="binomial", 
+                          metric=metric, 
+                          trControl=control, 
+                          tuneGrid = expand.grid(alpha = 1, lambda = seq(0, 1, by=0.05)))
+fit.ridge <- caret::train(CONDITION~. ,
+                          data=dat, 
+                          method = 'glmnet', 
+                          faimily = "binomial", 
+                          metric = metric, 
+                          trControl=control,
+                          tuneGrid = expand.grid(alpha = 0, lambda =  seq(0, 1, by=0.05))) 
+
+
+results <- resamples(list(LDA=fit.lda, RF=fit.rf, LASSO=fit.lasso, RIDGE = fit.ridge))
+summary(results)
+ggplot(results) + labs(y="Accuracy")
+
+```
+testing regression lambda parameters
+
+```{r}
+test <- sample(1:(n.HP + n.SP), 5)
+train <- setdiff(1:(n.HP + n.SP), test)
+
+# plot of the coefficients for different values of lambda
+fit = glmnet(dat[train,], diet_vs_diet_01[train], alpha = 0.7,  standardize = F, family = "binomial")
+plot(fit, xvar = "lambda", label = T)
+
+# this runs inside the cross validation
+cfit = cv.glmnet(data.matrix(dat[train,]), alpha = 0.7, diet_vs_diet_01[train], standardize = F, family = "binomial")
+plot(cfit)
+
+# occasionally you find params with beta != zero
+# coef(cfit, s=cfit$lambda.min)
+
+predict(fit, data.matrix(dat[test,]), type = "class", s=cfit$lambda.min)
+
+pred2 <- predict(fit, data.matrix(dat[test,]), type = "response", s = cfit$lambda.min)
+plot(performance(prediction(pred2, diet_vs_diet_01[test]), "tpr", "fpr"))
+auc.tmp <- performance(prediction(pred2, diet_vs_diet_01[test]), "auc")
+auc <- as.numeric(auc.tmp@y.values)
+```
+
+# rScudo
+
+```{r}
+n.top.bottom = 25
+N_ = 0.4
+
+set.seed(123)
+inTrain <- createDataPartition(f, list = F)
+trainData <- ex3_unique_probes[, inTrain]
+testData <- ex3_unique_probes[, -inTrain]
+
+trainRes <- scudoTrain(trainData, groups = f[inTrain], 
+                       nTop = n.top.bottom, nBottom = n.top.bottom, alpha = 0.05)
+
+upSignatures(trainRes)[1:5, 1:5]
+consensusUpSignatures(trainRes)[1:5, ]
+
+# training
+trainNet <- scudoNetwork(trainRes, N= N_)
+scudoPlot(trainNet, vertex.label = NA)
+
+# validation with test 
+testRes <- scudoTest(trainRes, testData, f[-inTrain])
+                     # ntop = 25, nbottom = 25)
+testNet <- scudoNetwork(testRes, N = N_)
+scudoPlot(testNet, vertex.label = NA)
+
+# indentify clusters on map
+testClust <- igraph::cluster_spinglass(testNet, spins = 2)
+plot(testClust, testNet, vertex.label = NA)
+
+# perform classification
+classRes <- scudoClassify(trainData, testData, N= N_,
+                          nTop = n.top.bottom, nBottom = n.top.bottom,
+                          trainGroups = f[inTrain], alpha = 0.5)
+caret::confusionMatrix(classRes$predicted, f[-inTrain])
+
+```
+
+## rScudo + caret
+
+```{r}
+
+model <- scudoModel(nTop = (2:6)*10, nBottom = (2:6)*10, N = N_)
+control <- caret::trainControl(method = "cv", number = 5, summaryFunction = caret::multiClassSummary)
+cvRes <- caret::train(x=t(trainData), y=f[inTrain], method = model, trControl = control)
+
+testRes <- scudoTest(trainRes, testData, f[-inTrain],
+cvRes$bestTune$nTop,
+cvRes$bestTune$nBottom5)
+testNet <- scudoNetwork(testRes, N = 0.5)
+scudoPlot(testNet, vertex.label = NA)
+
+classRes <- scudoClassify(ex3_unique_probes[, inTrain], ex3_unique_probes[,-inTrain], N_,
+                          cvRes$bestTune$nTop, cvRes$bestTune$nBottom,
+                          f[inTrain], alpha = 0.05)
+caret::confusionMatrix(classRes$predicted, f[-inTrain])
+                               
+```
+
+preparing lists of genes selected for each method that has been used till now
+
+```{r}
+# include in this list the first 200 genes that are considered important for the random forest classification
+
+# rf important genes for classification
+rf_importance <- varImp(fit.rf, scale=FALSE)
+t <- order(rf_importance$importance$Overall, decreasing = TRUE)
+rf_importance_list = c()
+for (i in 1:200){
+  rf_importance_list <- append(rf_importance_list, 
+                                  strsplit(rownames(rf_importance$importance)[t[i]], "`")[[1]][2])
+}
+
+# lda important genes for classification
+lda_importance <- varImp(fit.lda, scale=FALSE)
+t <- order(lda_importance$importance$X0, decreasing = TRUE)
+lda_importance_list <- rownames(lda_importance$importance[t[1:200], ])
+
+# lasso important genes for classification
+lasso_importance <- varImp(fit.lasso, scale=FALSE)
+t <- order(lasso_importance$importance$Overall, decreasing = TRUE)
+# these motherfuckers using different notations i hate it
+lasso_importance_list <- c()
+for (i in 1:200){
+  lasso_importance_list <- append(lasso_importance_list, 
+                                  strsplit(rownames(lasso_importance$importance)[t[i]], "`")[[1]][2])
+}
+
+
+# ridge important genes for classification
+ridge_importance <- varImp(fit.ridge, scale=FALSE)
+t <- order(ridge_importance$importance$Overall, decreasing = TRUE)
+# these motherfuckers using different notations i hate it
+ridge_importance_list <- c()
+for (i in 1:200){
+  ridge_importance_list <- append(ridge_importance_list, 
+                                  strsplit(rownames(ridge_importance$importance)[t[i]], "`")[[1]][2])
+}
+
+# lapply(ridge_importance_list, write, "C:/Users/vitto/Documents/uni/IV/second semester/Network based DA/project_NBDA/ridge_list.txt", append=TRUE, ncolumns=1000)
+# lapply(lda_importance_list, write, "C:/Users/vitto/Documents/uni/IV/second semester/Network based DA/project_NBDA/lda_list.txt", append=TRUE, ncolumns=1000)
+# lapply(rf_importance_list, write, "C:/Users/vitto/Documents/uni/IV/second semester/Network based DA/project_NBDA/rf_list.txt", append=TRUE, ncolumns=1000)
+# missing for SCUDO but performs like shit so whatever ^\/(`v`)\/^
+
+```
+
+
+# Network analysis
+
+
+```{r}
+# load ensembl data
+ensembl <- useMart("ensembl")
+ensembl <- useEnsembl(biomart = "ensembl", 
+                      dataset = "hsapiens_gene_ensembl", 
+                      mirror = "useast")
+# look for conversion table for probes
+ensembl_convertion_table <- getBM(attributes = c('affy_hugene_1_0_st_v1', 'hgnc_symbol'),
+      filters = 'affy_hugene_1_0_st_v1', 
+      # values = rf_importance_list,  
+      values = ridge_importance_list, 
+      mart = ensembl)
+
+# remove empty labels
+ensembl_convertion_table <- ensembl_convertion_table[!(ensembl_convertion_table$hgnc_symbol == ""), ]
+
+# insert p-value column
+ensembl_convertion_table["p_value"] <- NA
+
+# for each selected gene, calculate p-value
+# for (target in rf_importance_list){
+for (target in ridge_importance_list){
+  HP = c()
+  NP = c()
+  for (j in ER_positions){
+    if (group_labels[j] == "ER_HP") {
+      HP <- append(HP, 2^ex[target, j])
+    } else if (group_labels[j] == "ER_SP"){
+      NP <- append(NP, 2^ex[target, j])
+    }
+  }
+  t_NP_HP <- t.test(HP, NP)
+  
+  # insert p-value in correct row
+  for (i in 1:nrow(ensembl_convertion_table)){
+    # print(instance)
+    if (ensembl_convertion_table[i, ]$affy_hugene_1_0_st_v1 == target){
+      ensembl_convertion_table[i, ]$p_value = t_NP_HP$p.value
+    }
+  }
+}
+
+# run_pathfindR
+pathfindR_results <- run_pathfindR(ensembl_convertion_table[, c("hgnc_symbol", "p_value")], 
+                                   iterations = 1)
+pathfindR_cluster <- cluster_enriched_terms(pathfindR_results)
+term_gene_graph(pathfindR_results)
+```
+```{r}
+visualize_terms(pathfindR_results, hsa_KEGG = F)
+
+```
+
+```{r}
+lapply(ensembl_convertion_table$hgnc_symbol, write, "C:/Users/vitto/Documents/uni/IV/second semester/Network based DA/project_NBDA/nchg_names.txt", append=TRUE, ncolumns=1000)
+
+```
+
+
